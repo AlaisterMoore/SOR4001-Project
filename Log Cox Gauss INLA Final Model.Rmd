@@ -1,0 +1,1700 @@
+```{r}
+library(lgcp)
+library(spatstat.geom)
+library(dplyr)
+library(readxl)
+
+# Set working directory and load window data
+setwd("C:/Users/ajmoo/OneDrive - Queen's University Belfast/SOR4001 Project/R/DATA")
+
+PointControl <- read_excel("control_0d_Points.xlsx")
+Point3d <- read_excel("3d_pONT_Points.xlsx")
+Point7d <- read_excel("7d_pONT_Points.xlsx")
+Point21d <- read_excel("21d_pONT_Points.xlsx")
+Point56d <- read_excel("56d_pONT_Points.xlsx")
+
+# Add a time column to each dataset
+PointControl$time <- 0  # Control corresponds to t = 0
+Point3d$time <- 3  # 3-day dataset corresponds to t = 3
+Point7d$time <- 7  # 7-day dataset corresponds to t = 7
+Point21d$time <- 21  # 21-day dataset corresponds to t = 21
+Point56d$time <- 56  # 56-day dataset corresponds to t = 56
+
+Point_df_control <- as.data.frame(PointControl)
+Point_df_3d <- as.data.frame(Point3d)
+Point_df_7d <- as.data.frame(Point7d)
+Point_df_21d <- as.data.frame(Point21d)
+Point_df_56d <- as.data.frame(Point56d)
+
+# Define circle parameters (same for all windows)
+circle_radius <- 600  # Define radius in the same units as the data
+
+# Function to filter points within the circle
+filter_points_in_circle <- function(points_df, center, radius) {
+  points_df %>%
+    filter((X1 - center[1])^2 + (Y1 - center[2])^2 <= radius^2)
+}
+
+# Filter points for each dataset
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+Point_circle_control <- filter_points_in_circle(Point_df_control, circle_center, circle_radius)
+circle_center <- c(x = Point3d$`ONH X1`[1] + 600, y = Point3d$`ONH Y1`[1] - 400)
+Point_circle_3d <- filter_points_in_circle(Point_df_3d, circle_center, circle_radius)
+circle_center <- c(x = Point7d$`ONH X1`[1] + 600, y = Point7d$`ONH Y1`[1] - 400)
+Point_circle_7d <- filter_points_in_circle(Point_df_7d, circle_center, circle_radius)
+circle_center <- c(x = Point21d$`ONH X1`[1] + 600, y = Point21d$`ONH Y1`[1] - 400)
+Point_circle_21d <- filter_points_in_circle(Point_df_21d, circle_center, circle_radius)
+circle_center <- c(x = Point56d$`ONH X1`[1] + 600, y = Point56d$`ONH Y1`[1] - 400)
+Point_circle_56d <- filter_points_in_circle(Point_df_56d, circle_center, circle_radius)
+
+
+
+# Summary of results
+cat("Control: Points in circle =", nrow(Point_circle_control), "\n")
+cat("3d: Points in circle =", nrow(Point_circle_3d), "\n")
+cat("7d: Points in circle =", nrow(Point_circle_7d), "\n")
+cat("21d: Points in circle =", nrow(Point_circle_21d), "\n")
+cat("56d: Points in circle =", nrow(Point_circle_56d), "\n")
+```
+*Plot retinas*
+```{r}
+library(spatstat)
+
+# Function to create a circular window as a polygon
+create_circle <- function(center, radius, n_points = 100) {
+  theta <- seq(0, 2 * pi, length.out = n_points)  # Angles for the circle
+  x <- center[1] + radius * cos(theta)           # X coordinates of the circle
+  y <- center[2] + radius * sin(theta)           # Y coordinates of the circle
+  owin(poly = list(x = x, y = y))                # Create the polygonal window
+}
+
+# Define the circular window
+circle_window <- create_circle(circle_center, circle_radius)
+
+# Check the circular window
+plot(circle_window, main = "Circular Window", col = "lightblue")
+
+
+# Plot the original window and overlay the circular window
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+plot(windowcontrol, main = "Control Window with Circular Region", col = "lightgrey")
+plot(circle_window, add = TRUE, border = "red", lwd = 2)
+
+# Repeat for the other time points
+circle_center <- c(x = Point3d$`ONH X1`[1] + 600, y = Point3d$`ONH Y1`[1] - 400)
+plot(window3d, main = "3-day Window with Circular Region", col = "lightgrey")
+plot(circle_window, add = TRUE, border = "red", lwd = 2)
+
+circle_center <- c(x = Point7d$`ONH X1`[1] + 600, y = Point7d$`ONH Y1`[1] - 400)
+plot(window7d, main = "7-day Window with Circular Region", col = "lightgrey")
+plot(circle_window, add = TRUE, border = "red", lwd = 2)
+```
+Different Convex values
+```{r} 
+set.seed(1)
+
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+library(INLA)
+library(spatstat)
+library(dplyr)
+library(viridis)
+library(raster)
+library(sp)
+simulate_inla_model <- function(points_sample, circle_center, circle_radius) {
+  
+  Point_sample <- points_sample
+  circular_window <- disc(radius = circle_radius, centre = circle_center)
+  
+  # Create ppp object without area marks
+  Point_ppp <- ppp(
+    x = Point_sample$X1,
+    y = Point_sample$Y1,
+    window = circular_window
+  )
+  
+  # Calculate distance from the center
+  dist_from_center <- sqrt((Point_sample$X1 - circle_center[1])^2 + 
+                           (Point_sample$Y1 - circle_center[2])^2)
+  
+  # Add the distance as a covariate
+  Point_sample$dist_from_center <- dist_from_center
+
+  # Standardize dist_from_center
+  Point_sample$dist_from_center <- 
+    (Point_sample$dist_from_center - min(Point_sample$dist_from_center)) / 
+    (max(Point_sample$dist_from_center) - min(Point_sample$dist_from_center))
+  
+  # Create the formula for the model, excluding angle and area mark
+  formula <- y ~ -1 + DistFromCenter + f(spatial_field, model = spde)
+  
+  # Check if coordinates are valid
+  coords <- cbind(Point_sample$X1, Point_sample$Y1)
+  if (nrow(coords) == 0) {
+    stop("No valid coordinates found in the point sample.")
+  }
+  
+  # Create non-convex hull boundary
+  boundary1 <- inla.nonconvex.hull(coords, convex = -2) # Tight boundary
+  boundary2 <- inla.nonconvex.hull(coords, convex = 0.1)
+  boundary3 <- inla.nonconvex.hull(coords, convex = 1)
+  boundary4 <- inla.nonconvex.hull(coords, convex = 10)
+
+
+  if (is.null(boundary)) {
+    stop("Boundary creation failed. Please check the coordinates and convex parameter.")
+  }
+  
+  par(mfrow = c(1, 1))
+  
+  png("Convex_-2.png", width = 800, height = 800)
+  # Adjust mesh for spatial approximation
+  mesh1 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(200, 500), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary1
+  )
+  
+  
+  #plot(mesh1, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh1, main = "INLA Mesh")
+  dev.off()
+  
+  png("Convex_0.1.png", width = 800, height = 800)
+  mesh2 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(200, 500), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary2
+  )
+
+  #plot(mesh2, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh2, main = "INLA Mesh")
+  dev.off()
+  
+  png("Convex_1.png", width = 800, height = 800)
+
+  mesh3 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(200, 500), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary3
+  )
+  #plot(mesh3, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh3, main = "INLA Mesh")
+  dev.off()
+  
+  png("Convex_10.png", width = 800, height = 800)
+  mesh4 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(200, 500), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary4
+  )
+  
+  #plot(mesh4, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh4, main = "INLA Mesh")
+  dev.off()
+
+}
+
+
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+result_control <- simulate_inla_model(Point_circle_control, circle_center, circle_radius)
+
+```
+Different max edge values
+```{r} 
+set.seed(1)
+
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+library(INLA)
+library(spatstat)
+library(dplyr)
+library(viridis)
+library(raster)
+library(sp)
+simulate_inla_model <- function(points_sample, circle_center, circle_radius) {
+  
+  Point_sample <- points_sample
+  circular_window <- disc(radius = circle_radius, centre = circle_center)
+  
+  # Create ppp object without area marks
+  Point_ppp <- ppp(
+    x = Point_sample$X1,
+    y = Point_sample$Y1,
+    window = circular_window
+  )
+  
+  # Calculate distance from the center
+  dist_from_center <- sqrt((Point_sample$X1 - circle_center[1])^2 + 
+                           (Point_sample$Y1 - circle_center[2])^2)
+  
+  # Add the distance as a covariate
+  Point_sample$dist_from_center <- dist_from_center
+
+  # Standardize dist_from_center
+  Point_sample$dist_from_center <- 
+    (Point_sample$dist_from_center - min(Point_sample$dist_from_center)) / 
+    (max(Point_sample$dist_from_center) - min(Point_sample$dist_from_center))
+  
+  # Create the formula for the model, excluding angle and area mark
+  formula <- y ~ -1 + DistFromCenter + f(spatial_field, model = spde)
+  
+  # Check if coordinates are valid
+  coords <- cbind(Point_sample$X1, Point_sample$Y1)
+  if (nrow(coords) == 0) {
+    stop("No valid coordinates found in the point sample.")
+  }
+  
+  # Create non-convex hull boundary
+  boundary <- inla.nonconvex.hull(coords, convex = 0.1)
+
+
+  if (is.null(boundary)) {
+    stop("Boundary creation failed. Please check the coordinates and convex parameter.")
+  }
+  
+  par(mfrow = c(1, 1))
+  
+  png("max_edge_1.png", width = 800, height = 800)
+  # Adjust mesh for spatial approximation
+  mesh1 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(10, 1000), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary
+  )
+  
+  
+  #plot(mesh1, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh1, main = "INLA Mesh")
+  dev.off()
+  
+  png("max_edge_2.png", width = 800, height = 800)
+  mesh2 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(100, 1000), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary
+  )
+
+  #plot(mesh2, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh2, main = "INLA Mesh")
+  dev.off()
+  
+  png("max_edge_3.png", width = 800, height = 800)
+
+  mesh3 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(200, 1000), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary
+  )
+  #plot(mesh3, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh3, main = "INLA Mesh")
+  dev.off()
+  
+  png("max_edge_4.png", width = 800, height = 800)
+  mesh4 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(1000, 50), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary
+  )
+  
+  #plot(mesh4, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh4, main = "INLA Mesh")
+  dev.off()
+}
+
+
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+result_control <- simulate_inla_model(Point_circle_control, circle_center, circle_radius)
+
+```
+Different cutoff values
+```{r} 
+set.seed(1)
+
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+library(INLA)
+library(spatstat)
+library(dplyr)
+library(viridis)
+library(raster)
+library(sp)
+simulate_inla_model <- function(points_sample, circle_center, circle_radius) {
+  
+  Point_sample <- points_sample
+  circular_window <- disc(radius = circle_radius, centre = circle_center)
+  
+  # Create ppp object without area marks
+  Point_ppp <- ppp(
+    x = Point_sample$X1,
+    y = Point_sample$Y1,
+    window = circular_window
+  )
+  
+  # Calculate distance from the center
+  dist_from_center <- sqrt((Point_sample$X1 - circle_center[1])^2 + 
+                           (Point_sample$Y1 - circle_center[2])^2)
+  
+  # Add the distance as a covariate
+  Point_sample$dist_from_center <- dist_from_center
+
+  # Standardize dist_from_center
+  Point_sample$dist_from_center <- 
+    (Point_sample$dist_from_center - min(Point_sample$dist_from_center)) / 
+    (max(Point_sample$dist_from_center) - min(Point_sample$dist_from_center))
+  
+  # Create the formula for the model, excluding angle and area mark
+  formula <- y ~ -1 + DistFromCenter + f(spatial_field, model = spde)
+  
+  # Check if coordinates are valid
+  coords <- cbind(Point_sample$X1, Point_sample$Y1)
+  if (nrow(coords) == 0) {
+    stop("No valid coordinates found in the point sample.")
+  }
+  
+  # Create non-convex hull boundary
+  boundary <- inla.nonconvex.hull(coords, convex = 0.1)
+
+
+  if (is.null(boundary)) {
+    stop("Boundary creation failed. Please check the coordinates and convex parameter.")
+  }
+  
+  par(mfrow = c(1, 1))
+  
+  png("cuoff_1.png", width = 800, height = 800)
+  # Adjust mesh for spatial approximation
+  mesh1 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(1000,200), #Was c(200, 300)
+    cutoff = 10,
+    boundary = boundary
+  )
+  
+  
+  #plot(mesh1, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh1, main = "INLA Mesh")
+  dev.off()
+  
+  png("cuoff_2.png", width = 800, height = 800)
+  mesh2 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(1000,200), #Was c(200, 300)
+    cutoff = 20,
+    boundary = boundary
+  )
+
+  #plot(mesh2, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh2, main = "INLA Mesh")
+  dev.off()
+  
+  png("cuoff_3.png", width = 800, height = 800)
+
+  mesh3 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(1000,200), #Was c(200, 300)
+    cutoff = 30,
+    boundary = boundary
+  )
+  #plot(mesh3, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh3, main = "INLA Mesh")
+  dev.off()
+  
+  png("cuoff_4.png", width = 800, height = 800)
+  mesh4 <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(1000,200), #Was c(200, 300)
+    cutoff = 40,
+    boundary = boundary
+  )
+  
+  #plot(mesh4, main = "INLA Mesh")
+  #points(Point_sample$X1, Point_sample$Y1, col = "red", pch = 16, cex = 0.5)
+  
+  plot(mesh4, main = "INLA Mesh")
+  dev.off()
+}
+
+
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+result_control <- simulate_inla_model(Point_circle_control, circle_center, circle_radius)
+
+```
+
+
+
+
+
+
+Modeling only using the distance covariate
+```{r} 
+set.seed(1)
+
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+library(INLA)
+library(spatstat)
+library(dplyr)
+library(viridis)
+library(raster)
+library(sp)
+simulate_inla_model <- function(points_sample, circle_center, circle_radius) {
+  
+  Point_sample <- points_sample
+  circular_window <- disc(radius = circle_radius, centre = circle_center)
+  
+  # Create ppp object without area marks
+  Point_ppp <- ppp(
+    x = Point_sample$X1,
+    y = Point_sample$Y1,
+    window = circular_window
+  )
+  
+  # Calculate distance from the center
+  dist_from_center <- sqrt((Point_sample$X1 - circle_center[1])^2 + 
+                           (Point_sample$Y1 - circle_center[2])^2)
+  
+  # Add the distance as a covariate
+  Point_sample$dist_from_center <- dist_from_center
+
+  # Standardize dist_from_center
+  Point_sample$dist_from_center <- 
+    (Point_sample$dist_from_center - min(Point_sample$dist_from_center)) / 
+    (max(Point_sample$dist_from_center) - min(Point_sample$dist_from_center))
+  
+  # Create the formula for the model, excluding angle and area mark
+  formula <- y ~ -1 + DistFromCenter + f(spatial_field, model = spde)
+  
+  # Check if coordinates are valid
+  coords <- cbind(Point_sample$X1, Point_sample$Y1)
+  if (nrow(coords) == 0) {
+    stop("No valid coordinates found in the point sample.")
+  }
+  
+  # Create non-convex hull boundary
+  boundary <- inla.nonconvex.hull(coords, convex = 0.1)
+
+  if (is.null(boundary)) {
+    stop("Boundary creation failed. Please check the coordinates and convex parameter.")
+  }
+  
+  mesh <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(100, 1000), 
+    cutoff = 20, #Smaller cutoff values can be used for better results
+    boundary = boundary
+  )
+  
+  plot(mesh, main = "INLA Mesh")
+  
+  # Create the SPDE model
+  prior_range <- c(50, 0.9)
+  prior_sigma <- c(50, 0.1)
+  
+  spde <- inla.spde2.pcmatern(mesh = mesh, 
+                              alpha = 1.2, 
+                              prior.range = prior_range, 
+                              prior.sigma = prior_sigma)
+  
+  # Create an index for the spatial field
+  spatial_index <- inla.spde.make.index(name = "spatial_field", n.spde = spde$n.spde)
+  
+  # Add spatial random field to the stack
+  A_matrix <- inla.spde.make.A(mesh = mesh, loc = coords)
+  
+  # Set up the model stack without angle or area mark
+  stack <- inla.stack(
+    data = list(y = rep(1, nrow(Point_sample))),  # Placeholder response
+    A = list(1, A_matrix),
+    effects = list(
+      list(Intercept = 1, DistFromCenter = Point_sample$dist_from_center),
+      spatial_index
+    )
+  )
+  
+  # Run the model with INLA
+  result <- inla(
+    formula, 
+    data = inla.stack.data(stack), 
+    family = "poisson",
+    control.predictor = list(A = inla.stack.A(stack)), 
+    control.compute = list(dic = TRUE, cpo = TRUE)
+  )
+  
+  library(ggplot2)
+  
+    # Find the threshold dynamically to match the desired length
+    find_threshold <- function(fitted_values, target_length) {
+      lower <- min(fitted_values)
+      upper <- max(fitted_values)
+      tolerance <- 1e-6  # Precision of the threshold
+    
+      while (upper - lower > tolerance) {
+        mid <- (lower + upper) / 2
+        filtered_values <- fitted_values[fitted_values > mid]
+      
+        if (length(filtered_values) < target_length) {
+          upper <- mid
+        } else if (length(filtered_values) > target_length) {
+          lower <- mid
+        } else {
+          return(mid)
+        }
+      }
+    
+      return((lower + upper) / 2)
+  }
+
+  # Find the threshold
+  target_length <- mesh$n  # Desired length
+  fitted_values <- result$summary.fitted.values$mean
+  threshold <- find_threshold(fitted_values, target_length)
+
+  Point_mesh <- ppp(
+    x = mesh$loc[,1],
+    y = mesh$loc[,2],
+    window = circular_window)
+  
+  # Plot results
+  par(mfrow = c(1, 2))
+
+  # Define the color palette (viridis) for density plots
+  color_palette <- viridis::viridis(100)
+  
+  # Plot the intensity of Observed Data in the circular window
+  plot(density(Point_ppp), 
+      main = "Intensity of Observation",
+      col = color_palette)
+    
+
+  # Plot points with circles representing the area coverage
+  #symbols(Point_ppp$x, Point_ppp$y, 
+          #circles = 0.001, inches = FALSE, 
+          #add = TRUE, fg = 'red', bg = 'red', 
+          #xlab = "", ylab = "")
+  
+  # Plot the intensity of Simulated Data in the circular window
+  plot(density(Point_mesh, weights = marks(Point_mesh)), 
+      main = "Intensity of Simulation",
+      col = color_palette)
+  
+  # Plot points with circles representing the area coverage
+  #symbols(Point_ppp$x, Point_ppp$y, 
+          #circles = 0.001, inches = FALSE, 
+          #add = TRUE, fg = 'red', bg = 'red', 
+          #xlab = "", ylab = "")
+
+  print(summary(result))  # This will display the summary of the model results
+
+  return(result)
+}
+
+
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+result_control <- simulate_inla_model(Point_circle_control, circle_center, circle_radius)
+```
+Modeling only using the angle covariate
+```{r} 
+set.seed(1)
+
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+library(INLA)
+library(spatstat)
+library(dplyr)
+library(viridis)
+library(raster)
+library(sp)
+simulate_inla_model <- function(points_sample, circle_center, circle_radius) {
+  
+  Point_sample <- points_sample
+  circular_window <- disc(radius = circle_radius, centre = circle_center)
+  
+  # Create ppp object without area marks
+  Point_ppp <- ppp(
+    x = Point_sample$X1,
+    y = Point_sample$Y1,
+    window = circular_window
+  )
+  
+  angle_from_center <- atan2(Point_sample$Y1 - circle_center[2], 
+                             Point_sample$X1 - circle_center[1])
+
+  Point_sample$angle_from_center <- angle_from_center
+
+  # Standardize angle_from_center
+  Point_sample$angle_from_center <- 
+    (Point_sample$angle_from_center - min(Point_sample$angle_from_center)) / 
+    (max(Point_sample$angle_from_center) - min(Point_sample$angle_from_center))
+  
+  # Create the formula for the model, including the angle
+  formula <- y ~ -1 + AngleFromCenter + f(spatial_field, model = spde)
+  
+  # Check if coordinates are valid
+  coords <- cbind(Point_sample$X1, Point_sample$Y1)
+  if (nrow(coords) == 0) {
+    stop("No valid coordinates found in the point sample.")
+  }
+  
+  # Create non-convex hull boundary
+  boundary <- inla.nonconvex.hull(coords, convex = 0.1)
+
+  if (is.null(boundary)) {
+    stop("Boundary creation failed. Please check the coordinates and convex parameter.")
+  }
+  
+  mesh <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(100, 1000), 
+    cutoff = 20, #Smaller cutoff values can be used for better results
+    boundary = boundary
+  )
+  
+  plot(mesh, main = "INLA Mesh")
+  
+  # Create the SPDE model
+  prior_range <- c(50, 0.9)
+  prior_sigma <- c(50, 0.1)
+  
+  spde <- inla.spde2.pcmatern(mesh = mesh, 
+                              alpha = 1.2, 
+                              prior.range = prior_range, 
+                              prior.sigma = prior_sigma)
+  
+  # Create an index for the spatial field
+  spatial_index <- inla.spde.make.index(name = "spatial_field", n.spde = spde$n.spde)
+  
+  # Add spatial random field to the stack
+  A_matrix <- inla.spde.make.A(mesh = mesh, loc = coords)
+  
+  # Set up the model stack without angle or area mark
+  stack <- inla.stack(
+    data = list(y = rep(1, nrow(Point_sample))),  # Placeholder response
+    A = list(1, A_matrix),
+    effects = list(
+      list(Intercept = 1, AngleFromCenter = Point_sample$angle_from_center),
+      spatial_index
+    )
+  )
+  
+  # Run the model with INLA
+  result <- inla(
+    formula, 
+    data = inla.stack.data(stack), 
+    family = "poisson",
+    control.predictor = list(A = inla.stack.A(stack)), 
+    control.compute = list(dic = TRUE, cpo = TRUE)
+  )
+  
+  library(ggplot2)
+  
+    # Find the threshold dynamically to match the desired length
+    find_threshold <- function(fitted_values, target_length) {
+      lower <- min(fitted_values)
+      upper <- max(fitted_values)
+      tolerance <- 1e-6  # Precision of the threshold
+    
+      while (upper - lower > tolerance) {
+        mid <- (lower + upper) / 2
+        filtered_values <- fitted_values[fitted_values > mid]
+      
+        if (length(filtered_values) < target_length) {
+          upper <- mid
+        } else if (length(filtered_values) > target_length) {
+          lower <- mid
+        } else {
+          return(mid)
+        }
+      }
+    
+      return((lower + upper) / 2)
+  }
+
+  # Find the threshold
+  target_length <- mesh$n  # Desired length
+  fitted_values <- result$summary.fitted.values$mean
+  threshold <- find_threshold(fitted_values, target_length)
+
+  Point_mesh <- ppp(
+    x = mesh$loc[,1],
+    y = mesh$loc[,2],
+    window = circular_window)
+  
+  # Plot results
+  par(mfrow = c(1, 2))
+
+  # Define the color palette (viridis) for density plots
+  color_palette <- viridis::viridis(100)
+  
+  # Plot the intensity of Observed Data in the circular window
+  plot(density(Point_ppp), 
+      main = "Intensity of Observation",
+      col = color_palette)
+    
+
+  # Plot points with circles representing the area coverage
+  #symbols(Point_ppp$x, Point_ppp$y, 
+          #circles = 0.001, inches = FALSE, 
+          #add = TRUE, fg = 'red', bg = 'red', 
+          #xlab = "", ylab = "")
+  
+  # Plot the intensity of Simulated Data in the circular window
+  plot(density(Point_mesh, weights = marks(Point_mesh)), 
+      main = "Intensity of Simulation",
+      col = color_palette)
+  
+  # Plot points with circles representing the area coverage
+  #symbols(Point_ppp$x, Point_ppp$y, 
+          #circles = 0.001, inches = FALSE, 
+          #add = TRUE, fg = 'red', bg = 'red', 
+          #xlab = "", ylab = "")
+
+  print(summary(result))  # This will display the summary of the model results
+
+  return(result)
+}
+
+
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+result_control <- simulate_inla_model(Point_circle_control, circle_center, circle_radius)
+```
+Modeling using the distance and angle covariate
+```{r} 
+set.seed(1)
+
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+library(INLA)
+library(spatstat)
+library(dplyr)
+library(viridis)
+library(raster)
+library(sp)
+simulate_inla_model <- function(points_sample, circle_center, circle_radius) {
+  
+  Point_sample <- points_sample
+  circular_window <- disc(radius = circle_radius, centre = circle_center)
+  
+  # Create ppp object without area marks
+  Point_ppp <- ppp(
+    x = Point_sample$X1,
+    y = Point_sample$Y1,
+    window = circular_window
+  )
+  
+  # Calculate distance and angle from the center
+  dist_from_center <- sqrt((Point_sample$X1 - circle_center[1])^2 + 
+                           (Point_sample$Y1 - circle_center[2])^2)
+  angle_from_center <- atan2(Point_sample$Y1 - circle_center[2], 
+                             Point_sample$X1 - circle_center[1])
+
+  # Add the distance and angle as covariates
+  Point_sample$dist_from_center <- dist_from_center
+  Point_sample$angle_from_center <- angle_from_center
+
+  # Standardize dist_from_center
+  Point_sample$dist_from_center <- 
+    (Point_sample$dist_from_center - min(Point_sample$dist_from_center)) / 
+    (max(Point_sample$dist_from_center) - min(Point_sample$dist_from_center))
+
+  # Standardize angle_from_center
+  Point_sample$angle_from_center <- 
+    (Point_sample$angle_from_center - min(Point_sample$angle_from_center)) / 
+    (max(Point_sample$angle_from_center) - min(Point_sample$angle_from_center))
+  
+  # Create the formula for the model, including the angle
+  formula <- y ~ -1 + DistFromCenter + AngleFromCenter + f(spatial_field, model = spde)
+  
+  # Check if coordinates are valid
+  coords <- cbind(Point_sample$X1, Point_sample$Y1)
+  if (nrow(coords) == 0) {
+    stop("No valid coordinates found in the point sample.")
+  }
+  
+  # Create non-convex hull boundary
+  boundary <- inla.nonconvex.hull(coords, convex = 0.1)
+
+  if (is.null(boundary)) {
+    stop("Boundary creation failed. Please check the coordinates and convex parameter.")
+  }
+  
+  mesh <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(100, 1000), 
+    cutoff = 20, #Smaller cutoff values can be used for better results
+    boundary = boundary
+  )
+  
+  plot(mesh, main = "INLA Mesh")
+  
+  # Create the SPDE model
+  prior_range <- c(50, 0.9)
+  prior_sigma <- c(50, 0.1)
+  
+  spde <- inla.spde2.pcmatern(mesh = mesh, 
+                              alpha = 1.2, 
+                              prior.range = prior_range, 
+                              prior.sigma = prior_sigma)
+  
+  # Create an index for the spatial field
+  spatial_index <- inla.spde.make.index(name = "spatial_field", n.spde = spde$n.spde)
+  
+  # Add spatial random field to the stack
+  A_matrix <- inla.spde.make.A(mesh = mesh, loc = coords)
+  
+  # Set up the model stack without angle or area mark
+  stack <- inla.stack(
+    data = list(y = rep(1, nrow(Point_sample))),  # Placeholder response
+    A = list(1, A_matrix),
+    effects = list(
+      list(Intercept = 1, AngleFromCenter = Point_sample$angle_from_center, DistFromCenter = Point_sample$dist_from_center),
+      spatial_index
+    )
+  )
+  
+  # Run the model with INLA
+  result <- inla(
+    formula, 
+    data = inla.stack.data(stack), 
+    family = "poisson",
+    control.predictor = list(A = inla.stack.A(stack)), 
+    control.compute = list(dic = TRUE, cpo = TRUE)
+  )
+  
+  library(ggplot2)
+  
+    # Find the threshold dynamically to match the desired length
+    find_threshold <- function(fitted_values, target_length) {
+      lower <- min(fitted_values)
+      upper <- max(fitted_values)
+      tolerance <- 1e-6  # Precision of the threshold
+    
+      while (upper - lower > tolerance) {
+        mid <- (lower + upper) / 2
+        filtered_values <- fitted_values[fitted_values > mid]
+      
+        if (length(filtered_values) < target_length) {
+          upper <- mid
+        } else if (length(filtered_values) > target_length) {
+          lower <- mid
+        } else {
+          return(mid)
+        }
+      }
+    
+      return((lower + upper) / 2)
+  }
+
+  # Find the threshold
+  target_length <- mesh$n  # Desired length
+  fitted_values <- result$summary.fitted.values$mean
+  threshold <- find_threshold(fitted_values, target_length)
+
+  Point_mesh <- ppp(
+    x = mesh$loc[,1],
+    y = mesh$loc[,2],
+    window = circular_window)
+  
+  # Plot results
+  par(mfrow = c(1, 2))
+
+  # Define the color palette (viridis) for density plots
+  color_palette <- viridis::viridis(100)
+  
+  # Plot the intensity of Observed Data in the circular window
+  plot(density(Point_ppp), 
+      main = "Intensity of Observation",
+      col = color_palette)
+    
+
+  # Plot points with circles representing the area coverage
+  #symbols(Point_ppp$x, Point_ppp$y, 
+          #circles = 0.001, inches = FALSE, 
+          #add = TRUE, fg = 'red', bg = 'red', 
+          #xlab = "", ylab = "")
+  
+  # Plot the intensity of Simulated Data in the circular window
+  plot(density(Point_mesh, weights = marks(Point_mesh)), 
+      main = "Intensity of Simulation",
+      col = color_palette)
+  
+  # Plot points with circles representing the area coverage
+  #symbols(Point_ppp$x, Point_ppp$y, 
+          #circles = 0.001, inches = FALSE, 
+          #add = TRUE, fg = 'red', bg = 'red', 
+          #xlab = "", ylab = "")
+
+  print(summary(result))  # This will display the summary of the model results
+
+  return(result)
+}
+
+
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+result_control <- simulate_inla_model(Point_circle_control, circle_center, circle_radius)
+```
+
+
+
+
+
+
+Estimate prior range
+```{r} 
+PointControl$Area1
+
+
+```
+
+
+
+
+
+
+
+*Final model*
+```{r} 
+if(!require(ggregplot)) devtools::install_github("gfalbery/ggregplot") # Installing Greg's package for plotting functions!
+
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+library(INLA)
+library(spatstat)
+library(dplyr)
+library(viridis)
+library(raster)
+library(sp)
+simulate_inla_model <- function(points_sample, circle_center, circle_radius) {
+  
+  Point_sample <- points_sample
+  circular_window <- disc(radius = circle_radius, centre = circle_center)
+  
+  # Create ppp object
+  Point_ppp <- ppp(
+    x = Point_sample$X1,
+    y = Point_sample$Y1,
+    window = circular_window,
+    marks = Point_sample$Area1
+  )
+  
+  # Calculate distance and angle from the center
+  dist_from_center <- sqrt((Point_sample$X1 - circle_center[1])^2 + 
+                           (Point_sample$Y1 - circle_center[2])^2)
+  angle_from_center <- atan2(Point_sample$Y1 - circle_center[2], 
+                             Point_sample$X1 - circle_center[1])
+
+  # Add the distance and angle as covariates
+  Point_sample$dist_from_center <- dist_from_center
+  Point_sample$angle_from_center <- angle_from_center
+
+  # Standardize dist_from_center
+  Point_sample$dist_from_center <- 
+    (Point_sample$dist_from_center - min(Point_sample$dist_from_center)) / 
+    (max(Point_sample$dist_from_center) - min(Point_sample$dist_from_center))
+
+  # Standardize angle_from_center
+  Point_sample$angle_from_center <- 
+    (Point_sample$angle_from_center - min(Point_sample$angle_from_center)) / 
+    (max(Point_sample$angle_from_center) - min(Point_sample$angle_from_center))
+  
+  # Create the formula for the model, including the angle
+  formula <- y ~ -1 + DistFromCenter + AngleFromCenter + f(spatial_field, model = spde)
+  
+  # Check if coordinates are valid
+  coords <- cbind(Point_sample$X1, Point_sample$Y1)
+  if (nrow(coords) == 0) {
+    stop("No valid coordinates found in the point sample.")
+  }
+  
+  # Create non-convex hull boundary
+  boundary <- inla.nonconvex.hull(coords, convex = 0.1)
+
+  # Ensure the boundary is not NULL before proceeding
+  if (is.null(boundary)) {
+    stop("Boundary creation failed. Please check the coordinates and convex parameter.")
+  }
+  
+  # Adjust mesh for spatial approximation
+  mesh <- inla.mesh.2d(
+    loc = coords,
+    max.edge = c(100, 1000),
+    cutoff = 10,            #Making this value smaller improves the simulation
+    boundary = boundary
+  )
+  
+  
+  # Create the SPDE (Stochastic Partial Differential Equation) model
+  prior_range <- c(50, 0.9)   # Prior for the range of spatial correlation
+  prior_sigma <- c(50, 0.1)   # Prior for the spatial variability (sigma)
+  
+  spde <- inla.spde2.pcmatern(mesh = mesh, 
+                              alpha = 1.2, 
+                              prior.range = prior_range, 
+                              prior.sigma = prior_sigma)
+  
+  # Create an index for the spatial field
+  spatial_index <- inla.spde.make.index(name = "spatial_field", n.spde = spde$n.spde)
+  
+  # Add spatial random field to the stack
+  A_matrix <- inla.spde.make.A(mesh = mesh, loc = coords)  # Project spatial field onto mesh
+  
+  # Set up the model with unique names for the effects
+  stack <- inla.stack(
+    data = list(y = Point_sample$Area1), 
+    A = list(1, A_matrix),  # Include spatial field projection matrix
+    effects = list(
+      list(Intercept = 1, DistFromCenter = Point_sample$dist_from_center, 
+           AngleFromCenter = Point_sample$angle_from_center),
+      spatial_index  # Add spatial field effects
+    )
+  )
+  
+  # Run the model with INLA
+  result <- inla(
+    formula, 
+    data = inla.stack.data(stack), 
+    family = "poisson",  # log normal or gamma seem to be best
+    control.predictor = list(A = inla.stack.A(stack)), 
+    control.compute = list(dic = TRUE, cpo = TRUE)
+  )
+
+
+  # Print the summary of the result
+  print(summary(result))  # This will display the summary of the model results
+  
+  print(result$summary.fitted.values$mean)
+
+  # Find the threshold dynamically to match the desired length
+  find_threshold <- function(fitted_values, target_length) {
+    lower <- min(fitted_values)
+    upper <- max(fitted_values)
+    tolerance <- 1e-6  # Precision of the threshold
+  
+    while (upper - lower > tolerance) {
+      mid <- (lower + upper) / 2
+      filtered_values <- fitted_values[fitted_values > mid]
+    
+      if (length(filtered_values) < target_length) {
+        upper <- mid
+      } else if (length(filtered_values) > target_length) {
+        lower <- mid
+      } else {
+        return(mid)
+      }
+    }
+  
+    return((lower + upper) / 2)
+  }
+  # Find the threshold
+  target_length <- mesh$n  # Desired length
+  fitted_values <- result$summary.fitted.values$mean
+  threshold <- find_threshold(fitted_values, target_length)
+
+  # Filter values using the computed threshold
+  filtered_values <- fitted_values[fitted_values > threshold]
+
+  # Calculate the shared range for the y-axis
+  x_range <- range(c(0, 200))
+
+  # Calculate the shared range for the y-axis
+  x_range <- range(c(0, 200))
+  # Plot the second histogram with the determined x-axis range
+  hist(Point_sample$Area1, main = "Observed Area Values", 
+       xlim = x_range, xlab = expression("Area (pixels"^2*")"))  # x-axis label in pixels²
+  
+
+  # First histogram: Simulated Filtered Intensities
+  hist(filtered_values, main = "Simulated Area Values", 
+       xlim = x_range, xlab = expression("Area (pixels"^2*")"))  # x-axis label in pixels²
+
+  
+  # Calculate the shared range for the y-axis
+  
+  png("Sactter_Observed.png", width = 800, height = 800)
+
+  # Plot observed area values with the shared y-axis range
+  plot(Point_sample$Area1, type = "l", 
+       main = "Observed Area Values",
+       ylab = expression("Area (pixels"^2*")"))  # y-axis label in pixels²
+
+  
+  # Plot simulated filtered area values with the shared y-axis range
+  plot(filtered_values, type = "l", 
+       main = "Simulated Area Values",
+       ylab = expression("Area (pixels"^2*")"))  # y-axis label in pixels²
+
+    
+  intensity <- filtered_values/(circle_radius*pi)
+
+  # Create a projector with desired grid dimensions
+  # Set dimensions for the projector grid that matches the window's circular shape
+  field <- inla.mesh.projector(mesh, dims = c(1200, 1200)) # adjust c(x,x) to make the simulated plot more accurate
+
+  # Project the intensity onto the grid
+  intensity_grid <- inla.mesh.project(field, intensity)
+  
+  # Convert to raster and plot
+  intensity_raster <- raster(intensity_grid, 
+                           xmn = min(field$x), xmx = max(field$x), 
+                           ymn = min(field$y), ymx = max(field$y))
+  
+  # Create a circular polygon (window)
+  theta <- seq(0, 2 * pi, length.out = 100)
+  x_window <- circle_center[1] + circle_radius * cos(theta)
+  y_window <- circle_center[2] + circle_radius * sin(theta)
+  
+  # Create a SpatialPolygons object from the circular coordinates
+  circle_poly <- Polygon(cbind(x_window, y_window))
+  circle_sp <- SpatialPolygons(list(Polygons(list(circle_poly), ID = "circle")))
+  
+  # Mask the intensity raster with the circular window
+  masked_raster <- mask(intensity_raster, circle_sp)
+  
+  #Create a Density Plot of the Fitted Values
+  par(mfrow = c(1, 1))
+  density_plot <- density(fitted_values)
+  plot(density_plot, main = "Density of Fitted Values from INLA", xlab = "Fitted Values", ylab = "Density")
+  
+
+  # Define the color palette (viridis) for density plots
+  color_palette <- viridis::viridis(100)
+  # Ensure radii correspond to points in the ppp object
+  radii <- sqrt(marks(Point_ppp) / pi)  # Use the marks from the ppp object for consistency
+  # Define Mesh coordinates and area of points
+  Point_mesh <- ppp(
+    x = mesh$loc[,1],
+    y = mesh$loc[,2],
+    window = circular_window,
+    marks = filtered_values)
+  
+  # Plot the intensity of obsereved Data in the circular window
+  plot(density(Point_ppp, weights = marks(Point_ppp)), 
+      main = "Intensity of Observation",
+      col = color_palette)
+    
+
+  # Plot points with circles representing the area coverage
+  #symbols(Point_ppp$x, Point_ppp$y, 
+          #circles = radii, inches = FALSE, 
+          #add = TRUE, fg = 'red', bg = 'red', 
+          #xlab = "", ylab = "")
+
+  # Plot the intensity of Simulated Data in the circular window
+  plot(density(Point_mesh, weights = marks(Point_mesh)), 
+      main = "Intensity of Simulation",
+      col = color_palette)
+  # Plot points with circles representing the area coverage
+  #symbols(Point_ppp$x, Point_ppp$y, 
+          #circles = radii, inches = FALSE, 
+          #add = TRUE, fg = 'red', bg = 'red', 
+          #xlab = "", ylab = "")
+  
+
+  
+
+  
+  return(result)
+}
+
+
+# Example usage with the three datasets:
+circle_center <- c(x = PointControl$`ONH X1`[1] + 600, y = PointControl$`ONH Y1`[1] - 400)
+result_control <- simulate_inla_model(Point_circle_control, circle_center, circle_radius)
+
+circle_center <- c(x = Point3d$`ONH X1`[1] + 600, y = Point3d$`ONH Y1`[1] - 400)
+result_3d <- simulate_inla_model(Point_circle_3d, circle_center, circle_radius)
+
+circle_center <- c(x = Point7d$`ONH X1`[1] + 600, y = Point7d$`ONH Y1`[1] - 400)
+result_7d <- simulate_inla_model(Point_circle_3d, circle_center, circle_radius)
+
+circle_center <- c(x = Point21d$`ONH X1`[1] + 600, y = Point21d$`ONH Y1`[1] - 400)
+result_21d <- simulate_inla_model(Point_circle_21d, circle_center, circle_radius)
+
+circle_center <- c(x = Point56d$`ONH X1`[1] + 600, y = Point56d$`ONH Y1`[1] - 400)
+result_56d <- simulate_inla_model(Point_circle_56d, circle_center, circle_radius)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+*Decay based on Death of cells* 
+```{r}
+library(lgcp)
+library(spatstat.geom)
+library(dplyr)
+library(readxl)
+
+total_rows_X1_to_X16 <- sum(sapply(1:16, function(i) sum(!is.na(PointControl[[paste0("X", i)]]))))
+cat("Total number of rows from X1 to X16 in PointControl:", total_rows_X1_to_X16 / 16, "\n")
+
+total_rows_X1_to_X5 <- sum(sapply(1:5, function(i) sum(!is.na(Point3d[[paste0("X", i)]]))))
+cat("Total number of rows from X1 to X5 in Point3d:", total_rows_X1_to_X5 / 5, "\n")
+
+total_rows_X1_to_X7 <- sum(sapply(1:7, function(i) sum(!is.na(Point7d[[paste0("X", i)]]))))
+cat("Total number of rows from X1 to X7 in Point7d:", total_rows_X1_to_X7 / 7, "\n") 
+
+total_rows_X1_to_X9 <- sum(sapply(1:9, function(i) sum(!is.na(Point21d[[paste0("X", i)]]))))
+cat("Total number of rows from X1 to X9 in Point21d:", total_rows_X1_to_X9 / 9, "\n")
+
+total_rows_X1_to_X5 <- sum(sapply(1:5, function(i) sum(!is.na(Point56d[[paste0("X", i)]]))))
+cat("Total number of rows from X1 to X5 in Point56d:", total_rows_X1_to_X5 / 5, "\n")
+
+# Define time points and cell counts
+time_points <- c(0, 3, 7, 21, 56)
+Avg_cell_counts <- c(82591.62, 64844.4, 47512.29, 20957.11, 25596)
+
+# Take the natural logarithm of the cell counts
+log_cell_counts <- log(cell_counts)
+
+# Perform linear regression
+model <- lm(log_cell_counts ~ time_points)
+
+# Extract the decay rate (negative slope of the line)
+decay_rate <- -coef(model)["time_points"]
+
+# Print the decay rate
+print(decay_rate)
+
+plot(model)
+
+
+#Last two 56d retinas have a much higher intensity, even greater intensity than the 21d intensity
+plot(Point56d$X1, Point56d$Y1)
+plot(Point56d$X2, Point56d$Y2)
+plot(Point56d$X3, Point56d$Y3)
+plot(Point56d$X4, Point56d$Y4)
+plot(Point56d$X5, Point56d$Y5)
+```
+```{r}
+# Define time points and cell counts
+time_points <- c(0, 3, 7, 21, 56)
+cell_counts <- c(82591.62, 64844.4, 47512.29, 20957.11, 25596) #or 15767.67 depending on the point56d values used
+
+# Calculate decay rates for each time interval
+decay_rates <- numeric(length(time_points) - 1)
+for (i in 1:(length(time_points) - 1)) {
+  decay_rates[i] <- (log(cell_counts[i]) - log(cell_counts[i + 1])) / (time_points[i + 1] - time_points[i])
+}
+
+# Print decay rates
+print(decay_rates)
+
+# Check if the decay rates are increasing or decreasing over time
+is_decreasing <- all(diff(decay_rates) < 0)
+is_increasing <- all(diff(decay_rates) > 0)
+
+if (is_decreasing) {
+  print("Decay rate is decreasing over time.")
+} else if (is_increasing) {
+  print("Decay rate is increasing over time.")
+} else {
+  print("Decay rate is fluctuating over time.")
+}
+```
+*Investigating the number of points in each sample*
+```{r}
+# Define circle parameters (same for all windows)
+circle_radius <- 600  # Define radius in the same units as the data
+
+# Function to filter points within the circle
+filter_points_in_circle <- function(points_df, center, radius) {
+  points_df %>%
+    filter((X1 - center[1])^2 + (Y1 - center[2])^2 <= radius^2)
+}
+
+lambda_values_Control <- numeric(16)  
+for (i in 1:16) {
+  if (i == 4) next  # Skip window 4
+  
+  circle_center <- c(x = PointControl[[paste0("ONH X", i)]][1] + 600, 
+                     y = PointControl[[paste0("ONH Y", i)]][1] - 400)
+  
+  Point_circle_control <- filter_points_in_circle(Point_df_control, circle_center, circle_radius)
+  N <- nrow(Point_circle_control)
+  A <- pi * (circle_radius)^2
+  
+  lambda <- N / A  # Compute lambda
+  
+  lambda_values_Control[i] <- lambda  # Store the lambda value
+}
+lambda_values_Control <- lambda_values_Control[-4]
+Avg_Intensity_Control <- sum(lambda_values_Control)/15
+
+
+
+lambda_values_3d <- numeric(5)
+for (i in 1:5) {
+  if (i == 3) next  # Skip window 3
+  
+  circle_center <- c(x = Point3d[[paste0("ONH X", i)]][1] + 600, 
+                     y = Point3d[[paste0("ONH Y", i)]][1] - 400)
+  
+  Point_circle_3d <- filter_points_in_circle(Point_df_3d, circle_center, circle_radius)
+  N <- nrow(Point_circle_3d)
+  A <- pi * (circle_radius)^2
+  
+  lambda <- N / A  # Compute lambda
+  
+  lambda_values_3d[i] <- lambda  # Store the lambda value
+}
+lambda_values_3d <- lambda_values_3d[-3]
+Avg_Intensity_3d <- sum(lambda_values_3d)/4
+
+
+
+lambda_values_7d <- numeric(7)
+for (i in 1:7) {
+  
+  circle_center <- c(x = Point7d[[paste0("ONH X", i)]][1] + 600, 
+                     y = Point7d[[paste0("ONH Y", i)]][1] - 400)
+  
+  Point_circle_7d <- filter_points_in_circle(Point_df_7d, circle_center, circle_radius)
+  N <- nrow(Point_circle_7d)
+  A <- pi * (circle_radius)^2
+  
+  lambda <- N / A  # Compute lambda
+  
+  lambda_values_7d[i] <- lambda  # Store the lambda value
+}
+Avg_Intensity_7d <- sum(lambda_values_7d)/7
+
+
+
+lambda_values_21d <- numeric(9)
+for (i in 1:9) {
+  
+  circle_center <- c(x = Point21d[[paste0("ONH X", i)]][1] + 600, 
+                     y = Point21d[[paste0("ONH Y", i)]][1] - 400)
+  
+  Point_circle_21d <- filter_points_in_circle(Point_df_21d, circle_center, circle_radius)
+  N <- nrow(Point_circle_21d)
+  A <- pi * (circle_radius)^2
+  
+  lambda <- N / A  # Compute lambda
+  
+  lambda_values_21d[i] <- lambda  # Store the lambda value
+}
+Avg_Intensity_21d <- sum(lambda_values_21d)/9
+
+
+
+lambda_values_21d <- numeric(9)
+for (i in 1:9) {
+  
+  circle_center <- c(x = Point21d[[paste0("ONH X", i)]][1] + 600, 
+                     y = Point21d[[paste0("ONH Y", i)]][1] - 400)
+  
+  Point_circle_21d <- filter_points_in_circle(Point_df_21d, circle_center, circle_radius)
+  N <- nrow(Point_circle_21d)
+  A <- pi * (circle_radius)^2
+  
+  lambda <- N / A  # Compute lambda
+  
+  lambda_values_21d[i] <- lambda  # Store the lambda value
+}
+Avg_Intensity_21d <- sum(lambda_values_21d)/9
+
+
+
+lambda_values_56d <- numeric(5)
+for (i in 1:5) { #I dont think the last t
+  
+  circle_center <- c(x = Point56d[[paste0("ONH X", i)]][1] + 600, 
+                     y = Point56d[[paste0("ONH Y", i)]][1] - 400)
+  
+  Point_circle_56d <- filter_points_in_circle(Point_df_56d, circle_center, circle_radius)
+  N <- nrow(Point_circle_56d)
+  A <- pi * (circle_radius)^2
+  
+  lambda <- N / A  # Compute lambda
+  
+  lambda_values_56d[i] <- lambda  # Store the lambda value
+}
+Avg_Intensity_56d <- sum(lambda_values_56d)/5
+
+
+
+# Average intensity of samples
+print(Avg_Intensity_Control)
+print(Avg_Intensity_3d)
+print(Avg_Intensity_7d)
+print(Avg_Intensity_21d)
+print(Avg_Intensity_56d)
+
+# Function to calculate 95% confidence interval
+calculate_ci <- function(lambda_values, avg_intensity) {
+  n <- length(lambda_values)
+  s <- sd(lambda_values)
+  t_value <- qt(0.975, df = n - 1)  # 95% CI, two-tailed
+  margin_of_error <- t_value * (s / sqrt(n))
+  
+  lower_bound <- avg_intensity - margin_of_error
+  upper_bound <- avg_intensity + margin_of_error
+  
+  return(c(lower_bound, upper_bound))
+}
+
+# Calculate CIs
+ci_control <- calculate_ci(lambda_values_Control, Avg_Intensity_Control)
+ci_3d <- calculate_ci(lambda_values_3d, Avg_Intensity_3d)
+ci_7d <- calculate_ci(lambda_values_7d, Avg_Intensity_7d)
+ci_21d <- calculate_ci(lambda_values_21d, Avg_Intensity_21d)
+ci_56d <- calculate_ci(lambda_values_56d, Avg_Intensity_56d)
+
+# Print results
+print(paste("95% CI for Control:", ci_control[1], "to", ci_control[2]))
+print(paste("95% CI for 3d:", ci_3d[1], "to", ci_3d[2]))
+print(paste("95% CI for 7d:", ci_7d[1], "to", ci_7d[2]))
+print(paste("95% CI for 21d:", ci_21d[1], "to", ci_21d[2]))
+print(paste("95% CI for 56d:", ci_56d[1], "to", ci_56d[2]))
+
+```
+
+
+
+
+
+*Exponential decay*
+```{r} 
+library(INLA); library(ggplot2); library(ggregplot)
+library(tidyverse)
+library(RColorBrewer)
+library(INLA)
+library(spatstat)
+library(dplyr)
+library(viridis)
+library(raster)
+library(sp)
+
+simulate_inla_model_time <- function(points_sample, circle_center, circle_radius, time_points, decay_rate) {
+  
+  results <- list()  # Store results for each time point
+  
+  for (t in time_points) {
+    # Calculate the proportion of points remaining due to decay
+    remaining_fraction <- exp(-decay_rate * t)
+    num_points_remaining <- round(nrow(points_sample) * remaining_fraction)
+    
+    # Subsample points based on the remaining fraction
+    if (num_points_remaining > 0) {
+      points_sample <- points_sample[sample(1:nrow(points_sample), num_points_remaining), ]
+    } else {
+      stop("No points remaining after decay at time step ", t)
+    }
+    
+    # Create ppp object
+    circular_window <- disc(radius = circle_radius, centre = circle_center)
+    Point_ppp <- ppp(
+      x = points_sample$X1,
+      y = points_sample$Y1,
+      window = circular_window,
+      marks = points_sample$Area1
+    )
+    
+    # Calculate distance and angle from the center
+    dist_from_center <- sqrt((points_sample$X1 - circle_center[1])^2 + 
+                             (points_sample$Y1 - circle_center[2])^2)
+    angle_from_center <- atan2(points_sample$Y1 - circle_center[2], 
+                               points_sample$X1 - circle_center[1])
+    
+    # Add the distance and angle as covariates
+    points_sample$dist_from_center <- dist_from_center
+    points_sample$angle_from_center <- angle_from_center
+    points_sample$time <- t  # Add time as a covariate
+    
+    # Standardize dist_from_center
+    points_sample$dist_from_center <- 
+      (points_sample$dist_from_center - min(points_sample$dist_from_center)) / 
+      (max(points_sample$dist_from_center) - min(points_sample$dist_from_center))
+    
+    # Standardize angle_from_center
+    points_sample$angle_from_center <- 
+      (points_sample$angle_from_center - min(points_sample$angle_from_center)) / 
+      (max(points_sample$angle_from_center) - min(points_sample$angle_from_center))
+    
+    # Create the formula for the model, including time
+    formula <- y ~ -1 + DistFromCenter + AngleFromCenter + Time + f(spatial_field, model = spde)
+    
+    # Check if coordinates are valid
+    coords <- cbind(points_sample$X1, points_sample$Y1)
+    if (nrow(coords) == 0) {
+      stop("No valid coordinates found in the point sample.")
+    }
+    
+    # Create non-convex hull boundary
+    boundary <- inla.nonconvex.hull(coords, convex = 1)
+    if (is.null(boundary)) {
+      stop("Boundary creation failed. Please check the coordinates and convex parameter.")
+    }
+    
+    # Adjust mesh for spatial approximation
+    mesh <- inla.mesh.2d(
+      loc = coords,
+      max.edge = c(200, 300),
+      cutoff = 10,
+      boundary = boundary
+    )
+    
+    # Create the SPDE model
+    prior_range <- c(20, 0.9)
+    prior_sigma <- c(15, 0.1)
+    spde <- inla.spde2.pcmatern(mesh = mesh, 
+                                alpha = 1.2, 
+                                prior.range = prior_range, 
+                                prior.sigma = prior_sigma)
+    
+    # Create an index for the spatial field
+    spatial_index <- inla.spde.make.index(name = "spatial_field", n.spde = spde$n.spde)
+    
+    # Add spatial random field to the stack
+    A_matrix <- inla.spde.make.A(mesh = mesh, loc = coords)
+    stack <- inla.stack(
+      data = list(y = points_sample$Area1), 
+      A = list(1, A_matrix), 
+      effects = list(
+        list(Intercept = 1, DistFromCenter = points_sample$dist_from_center, 
+             AngleFromCenter = points_sample$angle_from_center, Time = t),
+        spatial_index
+      )
+    )
+    
+    # Run the model with INLA
+    result <- inla(
+      formula, 
+      data = inla.stack.data(stack), 
+      family = "poisson",  
+      control.predictor = list(A = inla.stack.A(stack)), 
+      control.compute = list(dic = TRUE, cpo = TRUE)
+    )
+    
+    plot(result$summary.fitted.values$mean)
+    print(mesh$n)
+    
+    
+    #Attempt at densities
+    # Find the threshold dynamically to match the desired length
+    find_threshold <- function(fitted_values, target_length) {
+      lower <- min(fitted_values)
+      upper <- max(fitted_values)
+      tolerance <- 1e-6  # Precision of the threshold
+  
+    while (upper - lower > tolerance) {
+        mid <- (lower + upper) / 2
+        filtered_values <- fitted_values[fitted_values > mid]
+    
+        if (length(filtered_values) < target_length) {
+          upper <- mid
+        } else if (length(filtered_values) > target_length) {
+          lower <- mid
+        } else {
+          return(mid)
+        }
+      }
+  
+      return((lower + upper) / 2)
+    }
+
+    # Find the threshold
+    target_length <- mesh$n  # Desired length
+    fitted_values <- result$summary.fitted.values$mean
+    threshold <- find_threshold(fitted_values, target_length)
+
+    # Filter values using the computed threshold
+    filtered_values <- fitted_values[fitted_values > threshold]
+    
+    # Optionally, plot or save intermediate results
+    #Attempt at densities
+  
+    # Plot results
+    par(mfrow = c(1, 1))
+
+    # Define the color palette (viridis) for density plots
+    color_palette <- viridis::viridis(100)
+
+    # Define Mesh coordinates and area of points
+    Point_mesh <- ppp(
+      x = mesh$loc[,1],
+      y = mesh$loc[,2],
+      window = circular_window,
+      marks = filtered_values)
+      
+    # Plot the intensity of Simulated Data in the circular window
+    plot(density(Point_mesh, weights = marks(Point_mesh)), 
+        main = paste("Intensity of Simulation at day", t,""),
+        col = color_palette)
+  
+    radii <- sqrt(marks(Point_ppp) / pi)  # Use the marks from the ppp object for consistency
+  
+    # Plot points with circles representing the area coverage
+    symbols(Point_ppp$x, Point_ppp$y, 
+            circles = radii, inches = FALSE, 
+            add = TRUE, fg = 'red', bg = 'red', 
+            xlab = "", ylab = "")
+  }
+  
+  return(results)
+}
+
+time_points <- c(0, 3, 7, 21, 56)
+decay_rate <- 0.01929191 #OR 0.02810801 depending on point56 values used
+result_control <- simulate_inla_model_time(Point_sample_control, circle_center, circle_radius, time_points, decay_rate)
+result_3d <- simulate_inla_model_time(Point_sample_3d, circle_center, circle_radius, time_points, decay_rate)
+result_7s <- simulate_inla_model_time(Point_sample_7d, circle_center, circle_radius, time_points, decay_rate)
+```

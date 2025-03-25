@@ -1,0 +1,1062 @@
+https://www.jstatsoft.org/article/view/v052i04
+lgcp package doesn't work as because the suplimentary matterial doesn't work and gives the same error as the code is was trying
+```{r}
+# Load required libraries
+library(lgcp)
+library(spatstat.geom)
+library(dplyr)
+library(readxl)
+
+# Set working directory and load window data
+setwd("C:/Users/ajmoo/OneDrive - Queen's University Belfast/SOR4001 Project/R/DATA")
+
+# Load the window data (boundary coordinates for each time point)
+windowcontrol <- read.table("control_x3.txt", sep = "\t")
+windowcontrol <- owin(poly = as.matrix(windowcontrol))
+window3d <- read.table("3d_pONT_x1.txt", sep = "\t")
+window3d <- owin(poly = as.matrix(window3d))
+window7d <- read.table("7d_pONT_x1.txt", sep = "\t")
+window7d <- owin(poly = as.matrix(window7d))
+
+# Load and prepare point data
+PointControl <- read_excel("control_0d_Points.xlsx")
+Point3d <- read_excel("3d_pONT_Points.xlsx")
+Point7d <- read_excel("7d_pONT_Points.xlsx")
+Point_df_control <- as.data.frame(PointControl)
+Point_df_3d <- as.data.frame(Point3d)
+Point_df_7d <- as.data.frame(Point7d)
+
+# Convert area from pixels to meters squared
+Point_df_control$Area_meters_squared <- Point_df_control$Area1 * (1.38 * 0.001)^2
+Point_df_3d$Area_meters_squared <- Point_df_3d$Area1 * (1.38 * 0.001)^2
+Point_df_7d$Area_meters_squared <- Point_df_7d$Area1 * (1.38 * 0.001)^2
+
+# Define circle parameters (same for all windows)
+circle_center <- c(x = 2500, y = 4000)  # Replace with actual coordinates
+circle_radius <- 100  # Define radius in the same units as the data
+
+# Function to filter points within the circle
+filter_points_in_circle <- function(points_df, center, radius) {
+  points_df %>%
+    filter((X1 - center[1])^2 + (Y1 - center[2])^2 <= radius^2)
+}
+
+# Filter points for each dataset
+Point_circle_control <- filter_points_in_circle(Point_df_control, circle_center, circle_radius)
+Point_circle_3d <- filter_points_in_circle(Point_df_3d, circle_center, circle_radius)
+Point_circle_7d <- filter_points_in_circle(Point_df_7d, circle_center, circle_radius)
+
+# Optional: Randomly sample up to 500 points from the filtered data
+Point_sample_control <- Point_circle_control %>% sample_n(min(n(), 500))
+Point_sample_3d <- Point_circle_3d %>% sample_n(min(n(), 500))
+Point_sample_7d <- Point_circle_7d %>% sample_n(min(n(), 500))
+
+# Add a time column to each dataset
+Point_sample_control$time <- 0  # Control corresponds to t = 0
+Point_sample_3d$time <- 3  # 3-day dataset corresponds to t = 3
+Point_sample_7d$time <- 7  # 7-day dataset corresponds to t = 7
+
+# Summary of results
+cat("Control: Points in circle =", nrow(Point_circle_control), "\n")
+cat("3d: Points in circle =", nrow(Point_circle_3d), "\n")
+cat("7d: Points in circle =", nrow(Point_circle_7d), "\n")
+
+Point_sample_3d
+```
+
+```{r}
+# Function to plot a circle on the window
+plot_circle_on_window <- function(window, circle_center, circle_radius, title) {
+  # Create the circle as a polygon
+  theta <- seq(0, 2 * pi, length.out = 200)  # Generate points for a smooth circle
+  circle_x <- circle_center[1] + circle_radius * cos(theta)
+  circle_y <- circle_center[2] + circle_radius * sin(theta)
+  
+  # Plot the window
+  plot(window, main = title, col = "lightblue", border = "blue")
+  
+  # Add the circle to the plot
+  lines(circle_x, circle_y, col = "red", lwd = 2)
+  
+  # Indicate the circle's center
+  points(circle_center[1], circle_center[2], col = "black", pch = 16)
+}
+
+# Plot the circle on each window
+par(mfrow = c(1, 3))  # Arrange plots in a single row
+plot_circle_on_window(windowcontrol, circle_center, circle_radius, "Control Window")
+plot_circle_on_window(window3d, circle_center, circle_radius, "3d Window")
+plot_circle_on_window(window7d, circle_center, circle_radius, "7d Window")
+
+```
+
+
+
+*rLGCP*
+*Try this next, its a LCGP using spats stats tutorial*
+https://towardsdatascience.com/fitting-point-process-models-in-r-263db85e12dc
+
+LGCP with no time parameter
+```{r}
+# Load required libraries
+library(spatstat)
+library(sf)
+library(sp)
+library(raster)
+library(fields)
+library(rstan)
+library(tidyverse)
+library(bayesplot)
+library(dplyr)
+
+# Function to simulate and analyze LGCP using your data
+analyze_lgcp <- function(points_df, center, radius, b0, b1, var, scale, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center)) # Ensure circular window
+
+  # Convert sampled points to ppp object
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win
+  )
+  
+  # Define the grid for environmental covariate (angle calculation)
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)  # Increase grid resolution
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)  # Increase grid resolution
+  
+  # Calculate angle around the circle for each point
+  gridcov <- outer(x_range, y_range, function(x, y) {
+    # Calculate angle in radians
+    atan2(y - center[2], x - center[1])
+  })
+
+  # Convert covariate to im object
+  cov_im <- im(gridcov, xcol = x_range, yrow = y_range)
+
+  # Simulate the LGCP
+  lgcp_sim <- rLGCP(
+    model = "exp",
+    mu = im(b0 + b1 * gridcov, xcol = x_range, yrow = y_range),
+    var = var,
+    scale = scale,
+    win = win
+  )
+  
+  # Plot results if requested
+  if (plotdat) {
+    par(mfrow = c(1, 2), mar = c(2, 2, 1, 1))
+    plot(points_ppp, main = "Observed Point Pattern")
+    plot(lgcp_sim, main = "Simulated LGCP")
+  }
+
+  # Return simulated LGCP and observed points for further analysis
+  list(simulated = lgcp_sim, observed = points_ppp)
+}
+
+# Parameters
+b0 <- -5.5   # Intercept
+b1 <- 0.2   # Coefficient for covariate (angle)
+var <- 0.1    # Variance
+scale <- 50  # Scale'
+
+# Plot observed points with time as color
+plot(result_control$observed, main = "Observed Points - Control")
+plot(result_3d$observed, main = "Observed Points - 3 Day")
+plot(result_7d$observed, main = "Observed Points - 7 Day")
+
+# Analyze each dataset
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_lgcp(Point_sample_control, circle_center, circle_radius, b0, b1, var, scale)
+
+cat("Analyzing 3-day dataset...\n")
+result_3d <- analyze_lgcp(Point_sample_3d, circle_center, circle_radius, b0, b1, var, scale)
+
+cat("Analyzing 7-day dataset...\n")
+result_7d <- analyze_lgcp(Point_sample_7d, circle_center, circle_radius, b0, b1, var, scale)
+
+summary(result_control$simulated) 
+summary(result_control$observed)#set b0 equal to log(avg intensity) = -5.4
+
+summary(result_3d$simulated)
+summary(result_3d$observed)
+
+summary(result_7d$simulated)
+summary(result_7d$observed)
+
+
+
+```
+Incorporating Time as a Covariate
+```{r}
+# Load required libraries
+library(spatstat)
+library(sf)
+library(sp)
+library(raster)
+library(fields)
+library(rstan)
+library(tidyverse)
+library(bayesplot)
+library(dplyr)
+
+# Function to simulate and analyze LGCP using your data
+analyze_lgcp <- function(points_df, center, radius, b0, b1, var, scale, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center)) # Ensure circular window
+
+  # Convert sampled points to ppp object
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win
+  )
+  
+  # Define the grid for environmental covariate (angle calculation)
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)  # Increase grid resolution
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)  # Increase grid resolution
+  
+  # Calculate angle around the circle for each point
+  gridcov <- outer(x_range, y_range, function(x, y) {
+    # Calculate angle in radians
+    atan2(y - center[2], x - center[1])
+  })
+
+  # Convert covariate to im object
+  cov_im <- im(gridcov, xcol = x_range, yrow = y_range)
+
+  # Adjust the mu to include the time term
+  mu_time <- im(
+    b0 + b1 * gridcov + b2 * time,
+    xcol = x_range,
+    yrow = y_range
+    )
+
+  lgcp_sim <- rLGCP(
+    model = "exp",
+    mu = mu_time,
+    var = var,
+    scale = scale,
+    win = win
+    )
+
+  # Plot results if requested
+  if (plotdat) {
+    par(mfrow = c(1, 2), mar = c(2, 2, 1, 1))
+    plot(points_ppp, main = "Observed Point Pattern")
+    plot(lgcp_sim, main = "Simulated LGCP")
+  }
+
+  # Return simulated LGCP and observed points for further analysis
+  list(simulated = lgcp_sim, observed = points_ppp)
+}
+
+# Parameters
+b0 <- -5.5   # Intercept
+b1 <- 0.2    # Coefficient for covariate (angle)
+b2 <- 1     # Time parameter
+time <- 0
+var <- 0.1    # Variance
+scale <- 50  # Scale
+
+# Analyze each dataset
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_lgcp(Point_sample_control, circle_center, circle_radius, b0, b1, var, scale)
+
+#Change the time and b2 parameter as required
+```
+Preventing overlaps
+```{r}
+# Load required libraries
+library(spatstat)
+library(dplyr)
+library(readxl)
+library(lgcp)
+
+# Function to remove overlapping points
+remove_overlapping_points <- function(ppp_obj, min_dist) {
+  # Iteratively remove points that are too close
+  keep <- rep(TRUE, npoints(ppp_obj))
+  for (i in seq_len(npoints(ppp_obj))) {
+    if (keep[i]) {
+      dist_to_others <- nndist(ppp_obj)[i]
+      if (dist_to_others < min_dist) {
+        keep[-i] <- nndist(ppp_obj[-i]) > min_dist
+      }
+    }
+  }
+  subset(ppp_obj, keep)
+}
+
+# Function to simulate and analyze LGCP with minimum distance constraint
+analyze_lgcp_no_overlap <- function(points_df, center, radius, b0, b1, var, scale, min_dist, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center)) # Ensure circular window
+
+  # Convert sampled points to ppp object
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win
+  )
+  
+  # Define the grid for environmental covariate (angle calculation)
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)
+  
+  # Calculate angle around the circle for each point
+  gridcov <- outer(x_range, y_range, function(x, y) atan2(y - center[2], x - center[1]))
+  cov_im <- im(gridcov, xcol = x_range, yrow = y_range)
+
+  # Simulate the LGCP
+  lgcp_sim <- rLGCP(
+    model = "exp",
+    mu = im(b0 + b1 * gridcov, xcol = x_range, yrow = y_range),
+    var = var,
+    scale = scale,
+    win = win
+  )
+  
+  # Apply hard-core thinning to prevent overlapping points
+  lgcp_no_overlap <- remove_overlapping_points(lgcp_sim, min_dist)
+
+  # Plot results if requested
+  if (plotdat) {
+    par(mfrow = c(1, 2), mar = c(2, 2, 1, 1))
+    plot(points_ppp, main = "Observed Point Pattern")
+    plot(lgcp_no_overlap, main = "LGCP Without Overlap")
+  }
+
+  # Return the simulated patterns
+  list(simulated = lgcp_sim, no_overlap = lgcp_no_overlap, observed = points_ppp)
+}
+
+# Parameters
+b0 <- -5.4    # Intercept
+b1 <- 0.2     # Coefficient for covariate (angle)
+var <- 0.1    # Variance
+scale <- 50   # Scale
+min_dist <- 3 # Minimum distance to prevent overlaps (units based on data)
+
+# Analyze datasets
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_lgcp_no_overlap(Point_sample_control, circle_center, circle_radius, b0, b1, var, scale, min_dist)
+
+cat("Analyzing 3-day dataset...\n")
+result_3d <- analyze_lgcp_no_overlap(Point_sample_3d, circle_center, circle_radius, b0, b1, var, scale, min_dist)
+
+cat("Analyzing 7-day dataset...\n")
+result_7d <- analyze_lgcp_no_overlap(Point_sample_7d, circle_center, circle_radius, b0, b1, var, scale, min_dist)
+
+# Summarize results
+cat("Control Dataset:\n")
+summary(result_control$no_overlap)
+summary(result_control$observed)
+cat("3-Day Dataset:\n")
+summary(result_3d$no_overlap)
+cat("7-Day Dataset:\n")
+summary(result_7d$no_overlap)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+*Need to reseach which model is better*
+Spatial-Temporal LGCP Guassian model
+```{r}
+# Load required libraries
+library(spatstat)
+library(sf)
+library(sp)
+library(raster)
+library(fields)
+library(rstan)
+library(tidyverse)
+library(bayesplot)
+library(dplyr)
+
+# Function to simulate and analyze spatiotemporal LGCP
+analyze_stlgcp <- function(points_df, center, radius, b0, b1, b2, var, scale, times, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center))  # Ensure circular window
+
+  # Convert sampled points to ppp object without marks (no time-based coloring)
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win
+  )
+  
+  # Define grid for spatiotemporal environmental covariates
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)  # Spatial grid resolution
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)  # Spatial grid resolution
+  t_range <- seq(min(times), max(times), length.out = 10)         # Temporal grid resolution
+
+  # Generate spatial covariate: angle around the circle
+  gridcov_spatial <- outer(x_range, y_range, function(x, y) {
+    atan2(y - center[2], x - center[1])  # Angle in radians
+  })
+
+  # Simulate the LGCP for each time slice
+  lgcp_sims <- list()  # Store simulated LGCPs for each time step
+
+  for (t in t_range) {
+    # Compute time-dependent intensity function
+    intensity_mu <- im(b0 + b1 * gridcov_spatial + b2 * t, xcol = x_range, yrow = y_range)
+
+    # Simulate LGCP for current time slice
+    lgcp_sims[[paste0("t_", t)]] <- rLGCP(
+      model = "gauss",     #Need to find out which model to use: one of “exponential”, “gauss”, “stable”, “gencauchy”, “matern”                      
+      mu = intensity_mu,
+      var = var,
+      scale = scale,
+      win = win
+    )
+  }
+
+  # Plot results if requested
+  if (plotdat) {
+    par(mfrow = c(1, 2), mar = c(2, 2, 1, 1))
+    
+    # Plot observed point pattern without marks (no color based on time)
+    plot(points_ppp, main = "Observed Point Pattern")
+    
+    # Plot simulated LGCPs
+    for (i in seq_along(lgcp_sims)) {
+      plot(lgcp_sims[[i]], main = paste("Simulated LGCP at t =", t_range[i]))
+    }
+  }
+
+  # Return simulated LGCPs and observed points for further analysis
+  list(simulated = lgcp_sims, observed = points_ppp)
+}
+
+# Parameters
+b0 <- -5.5    # Intercept
+b1 <- 0.2     # Coefficient for spatial covariate (angle)
+b2 <- -0.1    # Coefficient for temporal covariate (time)
+var <- 0.1    # Variance
+scale <- 50   # Scale
+times <- c(0, 3, 7)  # Time points for control, 3-day, and 7-day datasets
+
+# Analyze datasets
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_stlgcp(Point_sample_control, circle_center, circle_radius, b0, b1, b2, var, scale, times)
+
+
+
+# Plot observed points with time as color
+plot(result_3d$observed, main = "Observed Points - 3 Day")
+plot(result_7d$observed, main = "Observed Points - 7 Day")
+
+# Analyze each dataset
+#cat("Analyzing Control dataset...\n")
+#result_control <- analyze_stlgcp(Point_sample_control, circle_center, circle_radius, b0, b1, b2, var, scale, times)
+
+#cat("Analyzing 3-day dataset...\n")
+#result_3d <- analyze_stlgcp(Point_sample_3d, circle_center, circle_radius, b0, b1, b2, var, scale, times)
+
+#cat("Analyzing 7-day dataset...\n")
+#result_7d <- analyze_stlgcp(Point_sample_7d, circle_center, circle_radius, b0, b1, b2, var, scale, times)
+
+# Summaries
+#summary(result_control$simulated)
+#summary(result_control$observed)
+
+#summary(result_3d$simulated)
+#summary(result_3d$observed)
+
+#summary(result_7d$simulated)
+#summary(result_7d$observed)
+```
+
+
+
+
+Matern Model 
+```{r}
+# Load required libraries
+library(spatstat)
+library(sf)
+library(sp)
+library(raster)
+library(fields)
+library(rstan)
+library(tidyverse)
+library(bayesplot)
+library(dplyr)
+
+# Function to simulate and analyze spatiotemporal LGCP
+analyze_stlgcp <- function(points_df, center, radius, b0, b1, b2, var, scale, times, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center))  # Ensure circular window
+
+  # Convert sampled points to ppp object without marks (no time-based coloring)
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win
+  )
+  
+  # Define grid for spatiotemporal environmental covariates
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)  # Spatial grid resolution
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)  # Spatial grid resolution
+  t_range <- seq(min(times), max(times), length.out = 10)         # Temporal grid resolution
+
+  # Generate spatial covariate: angle around the circle
+  gridcov_spatial <- outer(x_range, y_range, function(x, y) {
+    atan2(y - center[2], x - center[1])  # Angle in radians
+  })
+
+  # Simulate the LGCP for each time slice
+  lgcp_sims <- list()  # Store simulated LGCPs for each time step
+
+  for (t in t_range) {
+    # Compute time-dependent intensity function
+    intensity_mu <- im(b0 + b1 * gridcov_spatial + b2 * t, xcol = x_range, yrow = y_range)
+
+    # Simulate LGCP for current time slice using Matern kernel, specifying 'nu'
+    lgcp_sims[[paste0("t_", t)]] <- rLGCP(
+      model = "matern",     # Using Matern kernel
+      mu = intensity_mu,
+      var = var,
+      scale = scale,
+      nu = 1.5,               # Specify nu, e.g., nu = 1 for smoother clusters (Gaussian-like), 1/2= Exp, 1= Gaussian, 1 to 1.5 = more complex clustering
+      win = win
+    )
+}
+
+
+
+  # Plot results if requested
+  if (plotdat) {
+    par(mfrow = c(1, 2), mar = c(2, 2, 1, 1))
+    
+    # Plot observed point pattern without marks (no color based on time)
+    plot(points_ppp, main = "Observed Point Pattern")
+    
+    # Plot simulated LGCPs
+    for (i in seq_along(lgcp_sims)) {
+      plot(lgcp_sims[[i]], main = paste("Simulated LGCP at t =", t_range[i]))
+    }
+  }
+
+  # Return simulated LGCPs and observed points for further analysis
+  list(simulated = lgcp_sims, observed = points_ppp)
+}
+
+# Parameters
+b0 <- -5.5    # Intercept
+b1 <- 0.2     # Coefficient for spatial covariate (angle)
+b2 <- -0.1    # Coefficient for temporal covariate (time)
+var <- 0.1    # Variance
+scale <- 50   # Scale
+times <- c(0, 3, 7)  # Time points for control, 3-day, and 7-day datasets
+
+# Analyze datasets
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_stlgcp(Point_sample_control, circle_center, circle_radius, b0, b1, b2, var, scale, times)
+
+
+
+plot(result_3d$observed, main = "Observed Points - 3 Day")
+plot(result_7d$observed, main = "Observed Points - 7 Day")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Angle and distance from circle as covariates, had to normalize the covariates so finding the parameter values is easier 
+```{r}
+library(spatstat)
+library(sf)
+library(sp)
+library(raster)
+library(fields)
+library(rstan)
+library(tidyverse)
+library(bayesplot)
+library(dplyr)
+
+# Function to simulate and analyze spatiotemporal LGCP
+analyze_stlgcp <- function(points_df, center, radius, b0, b1, b2, b3, var, scale, times, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center))  # Ensure circular window
+
+  # Convert sampled points to ppp object without marks (no time-based coloring)
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win
+  )
+  
+  # Define grid for spatiotemporal environmental covariates
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)  # Spatial grid resolution
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)  # Spatial grid resolution
+  t_range <- seq(min(times), max(times), length.out = 10)         # Temporal grid resolution
+
+  # Generate spatial covariate: angle around the circle
+  gridcov_spatial <- outer(x_range, y_range, function(x, y) {
+    atan2(y - center[2], x - center[1])/ (2 * pi)  # Angle in radians normalized
+  })
+
+  # Generate spatial covariate: distance from the center
+  grid_points <- expand.grid(x = x_range, y = y_range)  # Create grid of x, y points
+  distances <- sqrt((grid_points$x - center[1])^2 + (grid_points$y - center[2])^2)  # Euclidean distance from the center
+
+  # Convert distances into a matrix form corresponding to the grid
+  gridcov_distance_not_normal <- matrix(distances, nrow = length(x_range), ncol = length(y_range), byrow = TRUE)
+
+  # Calculate the minimum and maximum values of the distance matrix for normalization
+  min_distance <- min(gridcov_distance_not_normal)
+  max_distance <- max(gridcov_distance_not_normal)
+
+  # Normalize the distance covariate
+  gridcov_distance <- (gridcov_distance_not_normal - min_distance) / (max_distance - min_distance)  # Normalize
+
+  # Simulate the LGCP for each time slice
+  lgcp_sims <- list()  # Store simulated LGCPs for each time step
+
+  for (t in t_range) {
+    # Compute time-dependent intensity function, adding the distance covariate with b3
+    intensity_mu <- im(b0 + b1 * gridcov_spatial + b2 * t + b3 * gridcov_distance, 
+                       xcol = x_range, yrow = y_range)
+
+    # Simulate LGCP for current time slice using Matern kernel, specifying 'nu'
+    lgcp_sims[[paste0("t_", t)]] <- rLGCP(
+      model = "matern",     # Using Matern kernel
+      mu = intensity_mu,
+      var = var,
+      scale = scale,
+      nu = 1.5,               # Specify nu, e.g., nu = 1 for smoother clusters (Gaussian-like), 1/2= Exp, 1= Gaussian, 1 to 1.5 = more complex clustering
+      win = win
+    )
+  }
+
+  # Plot results if requested
+  if (plotdat) {
+    par(mfrow = c(1, 2), mar = c(2, 2, 1, 1))
+    
+    # Plot observed point pattern without marks (no color based on time)
+    plot(points_ppp, main = "Observed Point Pattern")
+    
+    # Plot simulated LGCPs
+    for (i in seq_along(lgcp_sims)) {
+      plot(lgcp_sims[[i]], main = paste("Simulated LGCP at t =", t_range[i]))
+    }
+  }
+
+  # Return simulated LGCPs and observed points for further analysis
+  list(simulated = lgcp_sims, observed = points_ppp)
+}
+
+# Parameters
+b0 <- -5.5    # Intercept
+b1 <- 0.2     # Coefficient for spatial covariate (angle)
+b2 <- -0.1    # Coefficient for temporal covariate (time)
+b3 <- -0.1     # Coefficient for distance covariate (distance from center)
+var <- 0.1    # Variance
+scale <- 50   # Scale
+times <- c(0, 3, 7)  # Time points for control, 3-day, and 7-day datasets
+
+# Analyze datasets
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_stlgcp(Point_sample_control, circle_center, circle_radius, b0, b1, b2, b3, var, scale, times)
+```
+
+
+*Still need to find how to choose the correct parameter values*
+Add area of points as a mark
+```{r}
+analyze_stlgcp_with_marks <- function(points_df, center, radius, b0, b1, b2, b3, var, scale, times, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center))  # Ensure circular window
+
+  # Convert sampled points to ppp object with marks (Area as marks)
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win,
+    marks = points_df$Area_meters_squared
+  )
+  
+  # Define grid for spatiotemporal environmental covariates
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)  # Spatial grid resolution
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)  # Spatial grid resolution
+  t_range <- seq(min(times), max(times), length.out = length(times))  # Temporal grid based on times
+
+  # Generate spatial covariate: angle around the circle
+  gridcov_spatial <- outer(x_range, y_range, function(x, y) {
+    atan2(y - center[2], x - center[1]) / (2 * pi)  # Angle in radians normalized
+  })
+
+  # Generate spatial covariate: distance from the center
+  grid_points <- expand.grid(x = x_range, y = y_range)  # Create grid of x, y points
+  distances <- sqrt((grid_points$x - center[1])^2 + (grid_points$y - center[2])^2)  # Euclidean distance from the center
+
+  # Convert distances into a matrix form corresponding to the grid
+  gridcov_distance_not_normal <- matrix(distances, nrow = length(x_range), ncol = length(y_range), byrow = TRUE)
+
+  # Calculate the minimum and maximum values of the distance matrix for normalization
+  min_distance <- min(gridcov_distance_not_normal)
+  max_distance <- max(gridcov_distance_not_normal)
+
+  # Normalize the distance covariate
+  gridcov_distance <- (gridcov_distance_not_normal - min_distance) / (max_distance - min_distance)  # Normalize
+
+  # Simulate the LGCP for each time slice
+  lgcp_sims <- list()  # Store simulated LGCPs for each time step
+
+  for (t in t_range) {
+    # Compute time-dependent intensity function, adding the distance covariate with b3
+    intensity_mu <- im(b0 + b1 * gridcov_spatial + b2 * t + b3 * gridcov_distance, 
+                       xcol = x_range, yrow = y_range)
+
+    # Simulate LGCP for current time slice using Matern kernel
+    lgcp_sims[[paste0("t_", t)]] <- rLGCP(
+      model = "matern",     # Using Matern kernel
+      mu = intensity_mu,
+      var = var,
+      scale = scale,
+      nu = 1.5,               # Specify nu
+      win = win
+    )
+  }
+
+  # Assign marks to simulated LGCP points
+  simulate_marks <- function(simulated_ppp, observed_marks) {
+    # Assign marks sampled from the observed marks distribution
+    simulated_ppp$marks <- sample(observed_marks, size = simulated_ppp$n, replace = TRUE)
+    return(simulated_ppp)
+  }
+
+  # Apply marks to all simulated LGCP points
+  lgcp_sims_with_marks <- lapply(lgcp_sims, simulate_marks, observed_marks = points_df$Area_meters_squared)
+
+  # Plot results if requested
+  if (plotdat) {
+    n_plots <- length(times) + 1  # Number of plots: one for observed + one for each time step
+    n_cols <- 2                  # Number of columns in the plot layout
+    n_rows <- ceiling(n_plots / n_cols)  # Calculate number of rows for the layout
+    par(mfrow = c(n_rows, n_cols), mar = c(2, 2, 1, 1))
+    
+    # Plot observed point pattern with marks (Area)
+    plot(points_ppp, main = "Observed Point Pattern")
+    
+    # Plot simulated LGCPs for each time slice
+    for (i in seq_along(times)) {
+      plot(lgcp_sims_with_marks[[i]], main = paste("Simulated LGCP at t =", times[i]))
+    }
+  }
+
+  # Return simulated LGCPs and observed points for further analysis
+  list(simulated = lgcp_sims_with_marks, observed = points_ppp)
+}
+
+# Parameters
+b0 <- -5.4    # Intercept
+b1 <- 0.1     # Coefficient for spatial covariate (angle), too high, it may create strong clustering around specific angular regions. Making this value large causes clustering at certain                   angles
+b2 <- -0.1    # Coefficient for temporal covariate (time), too high, it could amplify clustering based on the time slices.
+b3 <- 0.1    # Coefficient for distance covariate (distance from center), too high, it may create strong clustering around specific distances. Making this value large moves everything away                from the centre
+var <- 0.05    # Variance, lower value smoother intensity function
+scale <- 100   # Scale, increase to spread out the influence of individual points
+times <- c(0, 3, 7)  # Time points for control, 3-day, and 7-day datasets
+
+# Analyze the datasets
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_stlgcp_with_marks(Point_sample_control, circle_center, circle_radius, b0, b1, b2, b3, var, scale, times)
+
+cat("Analyzing 3-day dataset...\n")
+result_3d <- analyze_stlgcp_with_marks(Point_sample_3d, circle_center, circle_radius, b0, b1, b2, b3, var, scale, times)
+
+cat("Analyzing 7-day dataset...\n")
+result_7d <- analyze_stlgcp_with_marks(Point_sample_7d, circle_center, circle_radius, b0, b1, b2, b3, var, scale, times)
+```
+
+
+
+Density plot and area of point pattern is included in the calculation
+```{r}
+library(spatstat)
+library(sf)
+library(sp)
+library(raster)
+library(fields)
+library(rstan)
+library(tidyverse)
+library(bayesplot)
+library(dplyr)
+
+analyze_stlgcp_with_marks <- function(points_df, center, radius, b0, b1, b2, b3, var, scale, times, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center))  # Ensure circular window
+
+  # Convert sampled points to ppp object with marks (Area as marks)
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win,
+    marks = points_df$Area_meters_squared
+  )
+  
+  # Define grid for spatiotemporal environmental covariates
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)
+  t_range <- seq(min(times), max(times), length.out = length(times))
+
+  # Generate spatial covariates
+  gridcov_spatial <- outer(x_range, y_range, function(x, y) {
+    atan2(y - center[2], x - center[1]) / (2 * pi)
+  })
+
+  grid_points <- expand.grid(x = x_range, y = y_range)
+  distances <- sqrt((grid_points$x - center[1])^2 + (grid_points$y - center[2])^2)
+  gridcov_distance <- matrix(
+    (distances - min(distances)) / (max(distances) - min(distances)),
+    nrow = length(x_range), ncol = length(y_range), byrow = TRUE
+  )
+
+  # Simulate LGCP for each time slice
+  lgcp_sims <- list()
+  for (t in t_range) {
+    intensity_mu <- im(b0 + b1 * gridcov_spatial + b2 * t + b3 * gridcov_distance, xcol = x_range, yrow = y_range)
+    lgcp_sims[[paste0("t_", t)]] <- rLGCP(
+      model = "matern",
+      mu = intensity_mu,
+      var = var,
+      scale = scale,
+      nu = 1.5,
+      win = win
+    )
+  }
+
+  # Assign marks to simulated LGCP points
+  simulate_marks <- function(simulated_ppp, observed_marks) {
+    simulated_ppp$marks <- sample(observed_marks, size = simulated_ppp$n, replace = TRUE)
+    return(simulated_ppp)
+  }
+  lgcp_sims_with_marks <- lapply(lgcp_sims, simulate_marks, observed_marks = points_df$Area_meters_squared)
+
+  # Plot results if requested
+  if (plotdat) {
+    # Calculate densities considering marks (Area_meters_squared)
+    observed_density <- density(
+      points_ppp,
+      weights = points_ppp$marks,  # Use the area as weights
+      sigma = bw.diggle(points_ppp),
+      eps = 0.1
+    )
+    simulated_densities <- lapply(lgcp_sims_with_marks, function(ppp) {
+      density(
+        ppp,
+        weights = ppp$marks,  # Use simulated marks
+        sigma = bw.diggle(ppp),
+        eps = 0.2
+      )
+    })
+
+    # Find global zlim (shared scale across all densities)
+    all_density_values <- c(observed_density$v, unlist(lapply(simulated_densities, function(d) d$v)))
+    global_min <- min(all_density_values, na.rm = TRUE)
+    global_max <- max(all_density_values, na.rm = TRUE)
+
+    # Ensure zlim is valid
+    if (global_min >= global_max) {
+      stop("Invalid zlim: Ensure density values are not degenerate.")
+    }
+
+    # Plot observed and simulated densities
+    n_plots <- length(times) + 1
+    n_cols <- 2
+    n_rows <- ceiling(n_plots / n_cols)
+    par(mfrow = c(n_rows, n_cols), mar = c(2, 2, 1, 1))
+    
+    plot(observed_density, main = "Observed Point Density", zlim = c(global_min, global_max), ribscale = 1.5, ribargs = list(las = 1))
+    for (i in seq_along(times)) {
+      plot(simulated_densities[[i]], main = paste("Simulated Density at t =", times[i]), zlim = c(global_min, global_max), ribscale = 1.5, ribargs = list(las = 1))
+    }
+  }
+
+  list(simulated = lgcp_sims_with_marks, observed = points_ppp)
+}
+
+# Parameters
+b0 <- -5.8    # Intercept
+b1 <- 0.1     # Coefficient for spatial covariate (angle), too high, it may create strong clustering around specific angular regions. Making this value large causes clustering at certain                   angles
+b2 <- -0.12    # Coefficient for temporal covariate (time), too high, it could amplify clustering based on the time slices.
+b3 <- 0.1    # Coefficient for distance covariate (distance from center), too high, it may create strong clustering around specific distances. Making this value large moves everything away                from the centre
+var <- 0.3    # Variance, lower value smoother intensity function
+scale <- 0.2   # Scale, increase to spread out the influence of individual points
+times <- c(0, 3, 7)  # Time points for control, 3-day, and 7-day datasets
+ 
+# Analyze the datasets
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_stlgcp_with_marks(Point_sample_control, circle_center, circle_radius, b0, b1, b2, b3, var, scale, times)
+
+cat("Analyzing 3-day dataset...\n")
+result_3d <- analyze_stlgcp_with_marks(Point_sample_3d, circle_center, circle_radius, b0, b1, b2, b3, var, scale, times)
+
+cat("Analyzing 7-day dataset...\n")
+result_7d <- analyze_stlgcp_with_marks(Point_sample_7d, circle_center, circle_radius, b0, b1, b2, b3, var, scale, times)
+```
+
+Minimum Distance from centre 
+Points removed if they are not minimum distance
+```{r}
+
+# Function to enforce minimum distance between points
+enforce_min_distance <- function(points_ppp, min_dist) {
+  # Use spatstat's `rthin` to thin points based on the minimum distance
+  while (TRUE) {
+    # Compute the pairwise distances between points
+    pair_dists <- pairdist(points_ppp)
+    # Set the diagonal to infinity to exclude self-distances
+    diag(pair_dists) <- Inf
+    # Check if all pairwise distances are greater than the minimum distance
+    if (all(pair_dists > min_dist)) break
+    # Remove a random point that violates the minimum distance
+    points_ppp <- points_ppp[-sample(1:points_ppp$n, 1)]
+  }
+  return(points_ppp)
+}
+
+analyze_stlgcp_with_marks <- function(points_df, center, radius, b0, b1, b2, b3, var, scale, times, min_dist = NULL, plotdat = TRUE) {
+  # Define circular window
+  win <- owin(
+    xrange = c(center[1] - radius, center[1] + radius),
+    yrange = c(center[2] - radius, center[2] + radius)
+  )
+  win <- intersect.owin(win, disc(radius = radius, centre = center))  # Ensure circular window
+
+  # Convert sampled points to ppp object with marks (Area as marks)
+  points_ppp <- ppp(
+    x = points_df$X1,
+    y = points_df$Y1,
+    window = win,
+    marks = points_df$Area_meters_squared
+  )
+  
+  # Define grid for spatiotemporal environmental covariates
+  x_range <- seq(win$xrange[1], win$xrange[2], length.out = 100)
+  y_range <- seq(win$yrange[1], win$yrange[2], length.out = 100)
+  t_range <- seq(min(times), max(times), length.out = length(times))
+
+  # Generate spatial covariates
+  gridcov_spatial <- outer(x_range, y_range, function(x, y) {
+    atan2(y - center[2], x - center[1]) / (2 * pi)
+  })
+  grid_points <- expand.grid(x = x_range, y = y_range)
+  distances <- sqrt((grid_points$x - center[1])^2 + (grid_points$y - center[2])^2)
+  gridcov_distance <- matrix(distances, nrow = length(x_range), byrow = TRUE)
+  gridcov_distance <- (gridcov_distance - min(gridcov_distance)) / diff(range(gridcov_distance))
+
+  # Simulate LGCP for each time slice
+  lgcp_sims <- list()
+  for (t in t_range) {
+    intensity_mu <- im(b0 + b1 * gridcov_spatial + b2 * t + b3 * gridcov_distance, xcol = x_range, yrow = y_range)
+    lgcp_sim <- rLGCP("matern", mu = intensity_mu, var = var, scale = scale, nu = 1.5, win = win)
+    
+    # Enforce minimum distance if specified
+    if (!is.null(min_dist)) {
+      lgcp_sim <- enforce_min_distance(lgcp_sim, min_dist)
+    }
+    
+    lgcp_sims[[paste0("t_", t)]] <- lgcp_sim
+  }
+
+  # Assign marks to simulated points
+  simulate_marks <- function(simulated_ppp, observed_marks) {
+    simulated_ppp$marks <- sample(observed_marks, size = simulated_ppp$n, replace = TRUE)
+    return(simulated_ppp)
+  }
+  lgcp_sims_with_marks <- lapply(lgcp_sims, simulate_marks, observed_marks = points_df$Area_meters_squared)
+
+  # Plot results
+  if (plotdat) {
+    n_plots <- length(times) + 1
+    par(mfrow = c(ceiling(n_plots / 2), 2), mar = c(2, 2, 1, 1))
+    plot(points_ppp, main = "Observed Point Pattern")
+    for (i in seq_along(times)) {
+      plot(lgcp_sims_with_marks[[i]], main = paste("Simulated LGCP at t =", times[i]))
+    }
+  }
+
+  # Return results
+  list(simulated = lgcp_sims_with_marks, observed = points_ppp)
+}
+
+
+# Parameters
+b0 <- -5.8    # Intercept
+b1 <- 0.1     # Coefficient for spatial covariate (angle), too high, it may create strong clustering around specific angular regions. Making this value large causes clustering at certain                   angles
+b2 <- -0.12    # Coefficient for temporal covariate (time), too high, it could amplify clustering based on the time slices.
+b3 <- 0.1    # Coefficient for distance covariate (distance from center), too high, it may create strong clustering around specific distances. Making this value large moves everything away                from the centre
+var <- 0.3    # Variance, lower value smoother intensity function
+scale <- 0.2   # Scale, increase to spread out the influence of individual points
+times <- c(0, 3, 7)  # Time points for control, 3-day, and 7-day datasets
+min_dist = 0.005
+
+
+# Analyze the datasets
+cat("Analyzing Control dataset...\n")
+result_control <- analyze_stlgcp_with_marks(Point_sample_control, circle_center, circle_radius, b0, b1, b2, b3, var, scale, times, min_dist = 0.0005)
+
+```
